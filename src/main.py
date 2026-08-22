@@ -1,14 +1,15 @@
 import os
-import smtplib
-from datetime import datetime
 import re
+import smtplib
+import threading
 from datetime import date
+from datetime import datetime
 from email.message import EmailMessage
+from pathlib import Path
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 import requests
-from babel.dates import format_date
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
@@ -27,6 +28,14 @@ SMTP_HOST = os.getenv('SMTP_HOST')
 SMTP_PORT = os.getenv('SMTP_PORT')
 SMTP_USER = os.getenv('SMTP_USER')
 SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
+
+DATA_PATH = 'data/last-notified.txt'
+
+
+class RepeatTimer(threading.Timer):
+    def run(self):
+        while not self.finished.wait(self.interval):
+            self.function(*self.args, **self.kwargs)
 
 
 def get_sitemap_url(target_date: date):
@@ -47,6 +56,10 @@ def get_video_urls(target_date: date) -> Optional[List[str]]:
 
 
 def notify(url: str, date: date):
+    if url == get_last_notified_url():
+        print('No new replays found.')
+        return
+
     msg = EmailMessage()
     msg['Subject'] = f'New JT20H available: {date}'
     msg['From'] = SMTP_USER
@@ -62,6 +75,9 @@ def notify(url: str, date: date):
             server.starttls()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.send_message(msg)
+
+        write_last_notified_url(url)
+        print(f'New replay available: {url}')
     except Exception as e:
         print(f'Failed to send email: {e}')
 
@@ -75,8 +91,22 @@ def get_date_from_url(url: str) -> Optional[date]:
     return date(int(match.group('year')), month, int(match.group('date')))
 
 
-def main():
+def get_last_notified_url() -> Optional[str]:
+    if not os.path.exists(DATA_PATH):
+        return None
+    with open(DATA_PATH, 'r') as file:
+        return file.read().strip()
+
+
+def write_last_notified_url(url):
+    Path(DATA_PATH).parent.mkdir(parents=True, exist_ok=True)
+    with open(DATA_PATH, 'w') as file:
+        file.write(url)
+
+
+def check():
     today = datetime.now(ZoneInfo('Europe/Paris'))
+    print(f'[{today}] Checking for new JT20H replays...')
     urls = get_video_urls(today)
 
     if urls is None:
@@ -84,15 +114,29 @@ def main():
         return
 
     jt20h_urls = [url for url in urls if url.startswith(BASE_URL + JT20H_PATH_PREFIX)]
-    print(jt20h_urls)
     url_date = get_date_from_url(jt20h_urls[0])
-    print(format_date(url_date, format='long', locale='fr_FR'))
 
     if url_date is None:
         print('Failed to parse date from URL')
         return
 
     notify(jt20h_urls[0], url_date)
+
+
+def main():
+    check()
+    timer = RepeatTimer(15 * 60, check)
+    timer.daemon = True
+    timer.start()
+
+    try:
+        while timer.is_alive():
+            timer.join(timeout=1)
+    except KeyboardInterrupt:
+        print('Stopping...')
+        timer.cancel()
+        timer.join()
+        print('Stopped.')
 
 
 if __name__ == '__main__':
